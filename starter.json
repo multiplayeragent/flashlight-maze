@@ -1,0 +1,21 @@
+{
+  "name": "Flashlight Maze",
+  "genre": "horror",
+  "dim": "2D",
+  "mode": "Co-op",
+  "players": "1–4",
+  "hook": "Find three keys in the dark. Something is following you.",
+  "how": "Every run is a new pitch-black maze. Your flashlight shows the way, but the thing in the maze sees it too. Shine it in its face to slow it down, switch it off to hide. Find the three keys, then get anyone to the exit. If it catches a friend, stand by them to set them free.",
+  "controls": "WASD or arrows to walk, mouse to aim the flashlight, F or right-click for the light; on touch, drag to walk and tap the light button",
+  "uses": [
+    ["Host-run rules", "The host's browser runs the stalker, the keys and the exit; if it leaves, the next player takes over."],
+    ["Bots", "Bot teammates search the maze, free you when you're caught and lead it away."],
+    ["Leaderboard", "The team's fastest escape."],
+    ["Live sync", "Everyone's flashlight lights the maze for the whole team."]
+  ],
+  "ideas": [
+    "Give flashlights a battery that runs down",
+    "Add a second stalker after the first key",
+    "Make it a haunted house with doors that creak open"
+  ]
+}

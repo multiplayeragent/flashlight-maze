@@ -1,0 +1,697 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Flashlight Maze</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #050409; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #eae6f5; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; cursor: crosshair; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 1px 3px #000; }
+  #top { top: max(12px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left)); }
+  #keys { font-weight: 800; font-size: 20px; } #keys small { font-size: 14px; font-weight: 600; opacity: .8; margin-left: 8px; font-variant-numeric: tabular-nums; }
+  #team { margin-top: 6px; font-size: 13px; } #team div { display: flex; align-items: center; gap: 6px; } #team i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  #team .down { opacity: .6; text-decoration: line-through; }
+  #net { bottom: max(10px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); font-size: 12px; opacity: .7; white-space: nowrap; }
+  #hint { top: 22%; left: 50%; transform: translateX(-50%); width: min(460px, calc(100vw - 32px)); box-sizing: border-box; text-align: center; padding: 10px 14px; border-radius: 14px; background: #120e1ecc; font-weight: 600; transition: opacity .8s; }
+  #msg { top: 32%; left: 16px; right: 16px; text-align: center; font-size: 24px; font-weight: 900; opacity: 0; transition: opacity .3s; }
+  #msg.on { opacity: 1; }
+  #caught { inset: 0; display: grid; place-items: center; font-size: 22px; font-weight: 800; background: radial-gradient(transparent 35%, #6a0010b0); text-align: center; padding: 0 20px; }
+  #caught[hidden], #over[hidden], #lamp[hidden] { display: none; }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #050409c8; }
+  .card { width: min(380px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; padding: 22px; border-radius: 16px; background: #1a1428; border: 1px solid #ffffff22; text-align: center; box-sizing: border-box; }
+  .card h2 { margin: 0 0 4px; font-size: 26px; } .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffd27a; text-align: left; }
+  .card ol { text-align: left; margin: 0; padding-left: 24px; font-size: 14px; } .card li span { float: right; font-variant-numeric: tabular-nums; }
+  .card p { margin: 6px 0; opacity: .85; }
+  button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: #ffd27a; color: #2a1a00; font: 800 17px system-ui, sans-serif; cursor: pointer; }
+  #lamp { position: fixed; right: max(18px, env(safe-area-inset-right)); bottom: calc(max(18px, env(safe-area-inset-bottom)) + 20px); width: 84px; height: 84px; border-radius: 50%;
+          border: 2px solid #ffd27a99; background: #ffd27a33; color: #fff; font: 800 14px system-ui, sans-serif; touch-action: none; }
+  #lamp.off { background: #ffffff14; border-color: #ffffff44; color: #ffffff99; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="top"><div id="keys"></div><div id="team"></div></div>
+<div class="hud" id="hint"></div>
+<div class="hud" id="msg"></div>
+<div class="hud" id="caught" hidden>It got you.<br>Hold on: a friend can free you by standing next to you.</div>
+<div class="hud" id="net">Connecting…</div>
+<button id="lamp" hidden>LIGHT</button>
+<div id="over" hidden><div class="card">
+  <h2 id="overTitle"></h2><p id="overText"></p>
+  <h3>Fastest escapes</h3><ol id="board"><li>Loading…</li></ol>
+  <button class="go" id="again">Play again</button>
+</div></div>
+<script>
+/* ═══ FLASHLIGHT MAZE · a Multiplayer Agent starter ══════════════════════════════════════
+ * Find three keys in a pitch-black maze while something hunts you. Co-op, 1–4 players;
+ * bot teammates fill empty seats.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ speeds, light, the stalker's senses, timers, maze size
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   MAZE .......... building the maze from a seed: corridors, loops, keys, exit; walls, sight, paths
+ *   RUN (HOST) .... phases, keys, freeing caught friends, the exit, the stalker, the bot teammates.
+ *                   Only the host runs this and writes shared state.
+ *   ME ............ walking, aiming, the light switch. Each player writes only its own.
+ *   DRAW .......... camera, the maze, people, the stalker, darkness and flashlight cones
+ *   HUD & RESULTS . keys, team, messages, the results card, leaderboard, sound
+ *   INPUT ......... keyboard, mouse aim, touch stick and light button
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player writes its OWN entity: `p` (one JSON field: position, aim, light on/off,
+ *     moving) about 12 times a second, `hb` (heartbeat) once a second, `n`/`c` once.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s),
+ *     worked out every frame. Only the host writes the shared fields: `game` (id, version
+ *     `v`, seed, phase, timers incl. when the stalker wakes, which keys are found and by whom, who is caught and who is
+ *     being freed), `mon` (the stalker, ~10/s) and `bots`. A new host adopts all three.
+ *   - Every client builds the same maze from game.seed (a seeded PRNG).
+ *   - There are no intents to send but "again" {}: the host sees everyone's position, so it
+ *     picks up keys, frees caught players and opens the exit itself.
+ *   - The stalker sees a flashlight from far away and hears footsteps; a light in its face
+ *     slows it down. It downs who it catches.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "fastest-escape": the team's time, stored as 3600000 - ms (boards keep
+ *     the highest score), shown on the results card.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  cellsX: 11, cellsY: 8,  // maze size in cells (the map is 2 × cells + 1 tiles each way)
+  loops: 0.14,            // share of extra walls knocked out, so there is more than one way round
+  keys: 3,                // keys to find before the exit opens
+  seats: 3,               // bot teammates fill the team up to this many
+  speed: 3.4,             // your walking speed, tiles/s
+  botSpeed: 3.1,          // bot teammates
+  radius: 0.28,           // how wide a person is, in tiles
+  light: { range: 7, angle: 0.6, ambient: 1.6, dark: 0.96 }, // flashlight reach (tiles) and half-width (radians), the glow around you, how dark the dark is
+  // The stalker: speeds (tiles/s; it is faster than you), how much a flashlight in its face slows it,
+  // how far it sees a lit / unlit person and hears footsteps, ms it sleeps at the start, stops after a catch, keeps chasing what it lost.
+  stalker: { wander: 1.8, hunt: 2.6, chase: 3.4, inLight: 0.4, sight: 7, sightDark: 2.2, hear: 4, catch: 0.5, sleepMs: 8000, feedMs: 4000, giveUpMs: 2200 },
+  reach: 0.7,             // how close you get to pick up a key or reach the exit
+  freeMs: 2500,           // ms a teammate stands next to you to free you
+  briefMs: 3000,          // ms at the start before anyone may move
+  resultsMs: 15000,       // ms the results show before a new maze
+  board: "fastest-escape",
+};
+const BOT_NAMES = ["Milo", "Nell", "Rook", "Ivy", "Sam", "June"];
+const COLORS = ["#ff6b6b", "#4dabff", "#ffd23f", "#52d273", "#c77dff", "#ff9f43"];
+const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'flashlight-maze',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A shared JSON field, parsed once per change (read-only: never mutate what this returns). */
+function shared(key, fallback) {
+  const raw = S.shared[key], m = memo.get(key);
+  if (m && m.raw === raw) return m.v;
+  const v = parse(raw, fallback); memo.set(key, { raw, v }); return v;
+}
+let net = null, S = { entities: { players: {} }, shared: {} };
+const seenHb = new Map(); // sessionId -> { hb, at } on OUR clock
+/** Players whose heartbeat moved in the last 3s (plus us), sorted by sessionId. */
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+
+// ── MAZE ────────────────────────────────────────────────────────────────────────────
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+let mazeCache = null;
+/** The maze for a seed: a winding tree of corridors with a few extra gaps, keys in far dead ends, the exit on the right wall. */
+function maze(seed) {
+  if (mazeCache && mazeCache.seed === seed) return mazeCache;
+  const R = mulberry32(seed), cw = CONFIG.cellsX, ch = CONFIG.cellsY, W = cw * 2 + 1, H = ch * 2 + 1;
+  const wall = new Uint8Array(W * H).fill(1), open = (x, y) => { wall[y * W + x] = 0; };
+  const sy = Math.floor(ch / 2), seen = new Uint8Array(cw * ch), stack = [[0, sy]];
+  seen[sy * cw] = 1; open(1, sy * 2 + 1);
+  while (stack.length) { // carve: walk to a random unvisited neighbour, back up when stuck
+    const [cx, cy] = stack[stack.length - 1], nb = DIRS.filter(([dx, dy]) => cx + dx >= 0 && cy + dy >= 0 && cx + dx < cw && cy + dy < ch && !seen[(cy + dy) * cw + cx + dx]);
+    if (!nb.length) { stack.pop(); continue; }
+    const [dx, dy] = nb[Math.floor(R() * nb.length)], nx = cx + dx, ny = cy + dy;
+    open(cx * 2 + 1 + dx, cy * 2 + 1 + dy); open(nx * 2 + 1, ny * 2 + 1); seen[ny * cw + nx] = 1; stack.push([nx, ny]);
+  }
+  for (let k = 0; k < cw * ch * CONFIG.loops; k++) { // a few loops, so you can run around the stalker
+    const x = 1 + Math.floor(R() * (W - 2)), y = 1 + Math.floor(R() * (H - 2));
+    if ((x % 2) !== (y % 2) && (x % 2 ? !wall[(y - 1) * W + x] && !wall[(y + 1) * W + x] : !wall[y * W + x - 1] && !wall[y * W + x + 1])) open(x, y);
+  }
+  const start = { x: 1.5, y: sy * 2 + 1.5 }, dist = bfs({ W, H, wall }, Math.floor(start.x), Math.floor(start.y));
+  let ey = 0; for (let y = 0; y < ch; y++) if (dist[(y * 2 + 1) * W + W - 2] > dist[(ey * 2 + 1) * W + W - 2]) ey = y;
+  wall[(ey * 2 + 1) * W + W - 1] = 2; // the exit door, in the right-hand wall, as far from the start as it gets
+  const ends = [];
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) { const tx = x * 2 + 1, ty = y * 2 + 1; if (DIRS.filter(([dx, dy]) => !wall[(ty + dy) * W + tx + dx]).length === 1) ends.push({ x: tx + 0.5, y: ty + 0.5, d: dist[ty * W + tx] }); }
+  ends.sort((a, b) => b.d - a.d);
+  const keys = [];
+  for (const e of ends) if (keys.length < CONFIG.keys && e.d > 6 && keys.every((k) => Math.abs(k.x - e.x) + Math.abs(k.y - e.y) > 8)) keys.push(e);
+  for (const e of ends) if (keys.length < CONFIG.keys && !keys.includes(e) && e.d > 4) keys.push(e);
+  const maxD = Math.max(...dist), far = [...Array(W * H).keys()].filter((i) => !wall[i] && dist[i] > maxD * 0.55 && dist[i] < maxD * 0.85); // the stalker starts in the far half, not at the exit
+  const lair = far.length ? far[Math.floor(R() * far.length)] : W * (H - 2) + W - 2;
+  mazeCache = { seed, W, H, wall, start, exit: { x: W - 0.5, y: ey * 2 + 1.5, tx: W - 1, ty: ey * 2 + 1 }, keys: keys.map(({ x, y }) => ({ x, y })), ends, lair: { x: (lair % W) + 0.5, y: Math.floor(lair / W) + 0.5 } };
+  return mazeCache;
+}
+const solid = (M, x, y, open) => { if (x < 0 || y < 0 || x >= M.W || y >= M.H) return true; const w = M.wall[y * M.W + x]; return w === 1 || (w === 2 && !open); };
+/** Steps from (x, y) to every tile (walls are -1). */
+function bfs(M, x, y, open) {
+  const d = new Int16Array(M.W * M.H).fill(-1), q = [y * M.W + x]; d[q[0]] = 0;
+  for (let h = 0; h < q.length; h++) { const c = q[h], cx = c % M.W, cy = (c - cx) / M.W; for (const [dx, dy] of DIRS) { const nx = cx + dx, ny = cy + dy, n = ny * M.W + nx; if (!solid(M, nx, ny, open) && d[n] < 0) { d[n] = d[c] + 1; q.push(n); } } }
+  return d;
+}
+/** Tile centres from a to b, along the corridors (empty if there's no way). */
+function route(M, a, b, open) {
+  const tx = Math.floor(b.x), ty = Math.floor(b.y), d = bfs(M, tx, ty, open); let x = Math.floor(a.x), y = Math.floor(a.y), out = [];
+  if (d[y * M.W + x] < 0) return out;
+  for (let k = 0; k < 400 && (x !== tx || y !== ty); k++) {
+    const [dx, dy] = DIRS.find(([dx, dy]) => d[(y + dy) * M.W + x + dx] >= 0 && d[(y + dy) * M.W + x + dx] === d[y * M.W + x] - 1) || [0, 0];
+    x += dx; y += dy; out.push({ x: x + 0.5, y: y + 0.5 });
+  }
+  return out;
+}
+/** Distance to the first wall along a ray (a DDA walk through the tiles), up to maxD. */
+function castRay(M, x, y, ang, maxD, open) {
+  const dx = Math.cos(ang), dy = Math.sin(ang), sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1, ddx = Math.abs(1 / dx), ddy = Math.abs(1 / dy);
+  let tx = Math.floor(x), ty = Math.floor(y), nx = dx > 0 ? (tx + 1 - x) * ddx : (x - tx) * ddx, ny = dy > 0 ? (ty + 1 - y) * ddy : (y - ty) * ddy, d = 0;
+  while (d < maxD) { if (nx < ny) { d = nx; nx += ddx; tx += sx; } else { d = ny; ny += ddy; ty += sy; } if (solid(M, tx, ty, open)) return Math.min(d, maxD); }
+  return maxD;
+}
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const canSee = (M, a, b, open) => castRay(M, a.x, a.y, Math.atan2(b.y - a.y, b.x - a.x), dist(a, b), open) >= dist(a, b) - 0.05;
+const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
+/** Move a round body by (dx, dy) and push it out of any wall it ends up in. */
+function moveBody(M, b, dx, dy, open) {
+  const r = CONFIG.radius;
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+  for (const [mx, my] of [[dx, 0], [0, dy]]) {
+    b.x += mx; b.y += my;
+    for (let ty = Math.floor(b.y - r); ty <= Math.floor(b.y + r); ty++) for (let tx = Math.floor(b.x - r); tx <= Math.floor(b.x + r); tx++) {
+      if (!solid(M, tx, ty, open)) continue;
+      const px = Math.max(tx, Math.min(tx + 1, b.x)), py = Math.max(ty, Math.min(ty + 1, b.y)), ox = b.x - px, oy = b.y - py, d = Math.hypot(ox, oy);
+      if (d < r && d > 1e-6) { b.x = px + (ox / d) * r; b.y = py + (oy / d) * r; } else if (d <= 1e-6) { b.x -= mx; b.y -= my; }
+    }
+  }
+}
+
+// ── RUN (HOST) ──────────────────────────────────────────────────────────────────────
+const host = { last: null, was: false, bots: new Map(), mon: null, lastPub: 0, known: new Set(), visited: new Set(), runId: -1 };
+/** The run as state has it, or the host's own newer write that hasn't come back yet. `v` only goes up. */
+function game() {
+  const g = shared("game", null);
+  return host.last && isHost() && (!g || host.last.v > g.v) ? host.last : g;
+}
+function writeGame(g) { g = { ...g, v: (game()?.v ?? 0) + 1 }; host.last = g; net.setShared("game", JSON.stringify(g)); return g; }
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const isOpen = (g) => g.keys.every((k) => k.by);
+function startRun(id) {
+  const seed = Math.floor(Math.random() * 2 ** 31), M = maze(seed), t = Date.now();
+  const g = writeGame({ id, seed, phase: "brief", startAt: t + CONFIG.briefMs, wakeAt: t + CONFIG.briefMs + CONFIG.stalker.sleepMs, endsAt: 0, ms: 0, keys: M.keys.map((k) => ({ x: k.x, y: k.y, by: "" })), down: {}, free: {}, by: "" });
+  host.mon = { x: M.lair.x, y: M.lair.y, h: Math.PI, s: "sleep", t: "", goal: null, path: [], think: 0, until: 0, lostAt: 0 };
+  host.known.clear(); host.visited.clear(); host.runId = id;
+  let n = humans().length;
+  for (const b of host.bots.values()) Object.assign(b, spawnSpot(M, n++), { path: [], goal: null, mode: "search", think: 0 });
+  return g;
+}
+const humans = () => livePlayers().filter((id) => !(ATTRACT && id === net.sessionId));
+/** Spot n near the start (players take 0–3, bots after them), each a little apart. */
+const spawnSpot = (M, n) => ({ x: M.start.x + [0, 0.3, -0.3, 0.15, -0.15, 0][n % 6], y: M.start.y + [0, 0.3, -0.3, -0.3, 0.3, 0][n % 6] });
+/** Become host: take over the run, the stalker and the bots exactly as state has them. */
+function adopt() {
+  host.was = true; host.bots.clear();
+  for (const b of shared("bots", [])) host.bots.set(b.i, { id: b.i, name: b.n, color: b.c, x: b.x, y: b.y, a: b.a, l: !!b.l, path: [], goal: null, mode: "search", think: 0 });
+  const g = game(), m = shared("mon", null), M = g && maze(g.seed);
+  host.mon = { x: m ? m.x : M ? M.lair.x : 1.5, y: m ? m.y : M ? M.lair.y : 1.5, h: m ? m.h : 0, s: m && m.s !== "feed" ? m.s : "wander", t: m ? m.t : "", goal: null, path: [], think: 0, until: 0, lostAt: Date.now() };
+  host.runId = g ? g.id : -1;
+}
+/** Everyone in the maze: { id, name, color, x, y, a, l (light), m (moving), bot, mine }. */
+function people() {
+  const out = [];
+  for (const id of livePlayers()) {
+    if (id === net.sessionId) { if (!ATTRACT) out.push({ id, name: myName, color: myColor, x: me.x, y: me.y, a: me.a, l: me.l, m: me.m, mine: true }); continue; }
+    const p = S.entities.players[id], q = posOf(id); if (q) out.push({ id, name: p.n || "Player", color: p.c || "#ccc", x: q.x, y: q.y, a: q.a, l: !!q.l, m: !!q.m });
+  }
+  for (const b of botList()) out.push({ id: b.i, name: b.n, color: b.c, x: b.x, y: b.y, a: b.a, l: !!b.l, m: !!b.m, bot: true });
+  return out;
+}
+const posCache = new Map();
+function posOf(id) { const raw = S.entities.players[id]?.p, c = posCache.get(id); if (c && c.raw === raw) return c.v; const v = parse(raw, null); posCache.set(id, { raw, v }); return v; }
+function botList() {
+  if (isHost()) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: b.x, y: b.y, a: b.a, l: b.l ? 1 : 0, m: b.m ? 1 : 0 }));
+  return shared("bots", []);
+}
+function hostTick(dt, now) {
+  if (!host.was) adopt();
+  let g = game();
+  if (!g) g = startRun(1);
+  const t = Date.now(), G = clone(g), M = maze(G.seed);
+  if (host.runId !== G.id) { host.runId = G.id; host.known.clear(); host.visited.clear(); }
+  let dirty = fillBots(G, M);
+  const all = people(), up = all.filter((c) => !G.down[c.id]), open = isOpen(G);
+  if (G.phase === "brief" && t >= G.startAt) { G.phase = "hunt"; dirty = true; }
+  if (G.phase === "hunt") {
+    dirty = stalkerTick(dt, G, up, t, M) || dirty;
+    for (const k of G.keys) if (!k.by) { const c = up.find((c) => dist(c, k) < CONFIG.reach); if (c) { k.by = c.name; dirty = true; } }
+    for (const id of Object.keys(G.down)) { // freeing: a teammate standing next to you for freeMs
+      const v = all.find((c) => c.id === id), helper = v && up.find((c) => c.id !== id && dist(c, v) < 1.1);
+      if (!v) { delete G.down[id]; delete G.free[id]; dirty = true; }
+      else if (helper && !G.free[id]) { G.free[id] = t; dirty = true; }
+      else if (!helper && G.free[id]) { delete G.free[id]; dirty = true; }
+      else if (G.free[id] && t - G.free[id] >= CONFIG.freeMs) { delete G.down[id]; delete G.free[id]; dirty = true; }
+    }
+    const out = open && up.find((c) => dist(c, M.exit) < CONFIG.reach + 0.4);
+    if (out) Object.assign(G, { phase: "won", ms: t - G.startAt, by: out.name, endsAt: t + CONFIG.resultsMs }), (dirty = true);
+    else if (all.length && !up.length) Object.assign(G, { phase: "lost", endsAt: t + CONFIG.resultsMs }), (dirty = true);
+  }
+  for (const b of host.bots.values()) botTick(b, dt, G, all, t, M);
+  if (dirty) g = writeGame(G);
+  if ((g.phase === "won" || g.phase === "lost") && t >= g.endsAt) startRun(g.id + 1);
+  if (now - host.lastPub > 100) { // ~10/s: one message for the stalker, one for all the bots
+    host.lastPub = now;
+    const m = host.mon, r2 = (v) => Math.round(v * 100) / 100;
+    net.setShared("mon", JSON.stringify({ x: r2(m.x), y: r2(m.y), h: r2(m.h), s: m.s, t: m.t, lit: m.lit ? 1 : 0 }));
+    net.setShared("bots", JSON.stringify(botList().map((b) => ({ ...b, x: r2(b.x), y: r2(b.y), a: r2(b.a) }))));
+  }
+}
+/** Bots fill the team up to CONFIG.seats. */
+function fillBots(G, M) {
+  const want = Math.max(0, CONFIG.seats - humans().length);
+  let dirty = false;
+  while (host.bots.size > want) { const id = [...host.bots.keys()].pop(); if (G.down[id]) { delete G.down[id]; delete G.free[id]; dirty = true; } host.bots.delete(id); }
+  while (host.bots.size < want) {
+    const used = new Set([...host.bots.values()].map((b) => b.name)), usedC = new Set([...people().map((p) => p.color), myColor]), id = "~b" + Math.random().toString(36).slice(2, 6);
+    host.bots.set(id, { id, name: BOT_NAMES.find((n) => !used.has(n)) || "Bot", color: COLORS.find((c) => !usedC.has(c)) || COLORS[5], ...spawnSpot(M, humans().length + host.bots.size), a: 0, l: true, path: [], goal: null, mode: "search", think: 0 });
+  }
+  return dirty;
+}
+/** Is the stalker standing in someone's flashlight? (It flinches and slows down.) */
+const litBy = (m, up, M, open) => up.find((c) => c.l && dist(c, m) < 5 && Math.abs(angDiff(Math.atan2(m.y - c.y, m.x - c.x), c.a)) < CONFIG.light.angle && canSee(M, c, m, open));
+/** The stalker: wanders the dead ends, walks to footsteps it hears, chases who it sees, downs who it catches. */
+function stalkerTick(dt, G, up, t, M) {
+  const m = host.mon, K = CONFIG.stalker, open = isOpen(G);
+  if (t < (G.wakeAt ?? G.startAt + K.sleepMs)) { m.s = "sleep"; return false; }
+  if (m.s === "sleep") m.s = "wander";
+  if (m.s === "feed") { if (t < m.until) return false; Object.assign(m, { s: "wander", goal: null, path: [] }); }
+  let seen = null, sd = Infinity;
+  for (const c of up) {
+    const d = dist(m, c);
+    if (d > (c.l ? K.sight : K.sightDark) || d >= sd) continue;
+    if ((Math.abs(angDiff(Math.atan2(c.y - m.y, c.x - m.x), m.h)) < 1.2 || d < 2.2) && canSee(M, m, c, open)) { seen = c; sd = d; }
+  }
+  if (seen) { if (m.t !== seen.id) m.think = 0; Object.assign(m, { s: "chase", t: seen.id, goal: { x: seen.x, y: seen.y }, lostAt: t }); }
+  else if (m.s === "chase" && t - m.lostAt > K.giveUpMs) Object.assign(m, { s: "hunt", t: "" });
+  if (m.s !== "chase") for (const c of up) if (c.m && dist(m, c) < K.hear) { if (m.s !== "hunt") m.think = 0; Object.assign(m, { s: "hunt", goal: { x: c.x, y: c.y } }); break; }
+  if (!m.goal) { m.goal = M.ends[Math.floor(Math.random() * M.ends.length)]; m.think = 0; }
+  if (t > m.think || !m.path.length) { m.think = t + (m.s === "chase" ? 250 : 900); m.path = route(M, m, m.goal, open); if (!m.path.length && m.s !== "chase") Object.assign(m, { s: "wander", goal: null }); }
+  const lit = litBy(m, up, M, open), speed = (m.s === "chase" ? K.chase : m.s === "hunt" ? K.hunt : K.wander) * (lit ? K.inLight : 1);
+  m.lit = !!lit;
+  const caught = () => { const c = up.find((c) => dist(m, c) < K.catch); if (!c) return false; G.down[c.id] = t; Object.assign(m, { s: "feed", until: t + K.feedMs, t: "", goal: null, path: [] }); return true; };
+  if (caught()) return true;
+  if (seen && sd < 1.4) { const dx = seen.x - m.x, dy = seen.y - m.y; moveBody(M, m, (dx / sd) * speed * dt, (dy / sd) * speed * dt, open); m.h = Math.atan2(dy, dx); } // close: straight at them
+  else follow(M, m, speed, dt, open);
+  if (m.s !== "chase" && m.goal && dist(m, m.goal) < 0.6) Object.assign(m, { s: "wander", goal: null });
+  return caught();
+}
+/** Walk along a path of tile centres. Returns true if it moved. */
+function follow(M, b, speed, dt, open) {
+  while (b.path.length && dist(b, b.path[0]) < 0.12) b.path.shift();
+  const n = b.path[0]; if (!n) return false;
+  const d = dist(b, n), step = Math.min(d, speed * dt);
+  moveBody(M, b, ((n.x - b.x) / d) * step, ((n.y - b.y) / d) * step, open);
+  b.h = Math.atan2(n.y - b.y, n.x - b.x);
+  return true;
+}
+/** Bot teammates: search dead ends for keys, flee and shine at the stalker, free friends, head out. */
+function botTick(b, dt, G, all, t, M) {
+  b.m = false;
+  if (G.down[b.id] || G.phase !== "hunt") return;
+  const m = host.mon, open = isOpen(G);
+  for (const e of M.ends) if (dist(b, e) < 1.2) host.visited.add(e);
+  G.keys.forEach((k, i) => { if (!k.by && dist(b, k) < 6 && canSee(M, b, k, open)) host.known.add(i); });
+  const threat = m.s !== "feed" && m.s !== "sleep" && ((m.s === "chase" && m.t === b.id) || (dist(m, b) < 6 && canSee(M, b, m, open)));
+  if (t > b.think) { b.think = t + 400 + Math.random() * 300; botThink(b, G, all, M, threat); }
+  if (follow(M, b, CONFIG.botSpeed, dt, open)) b.m = true;
+  for (const o of host.bots.values()) { const d = dist(o, b); if (o !== b && d < 0.6 && d > 0.001) moveBody(M, b, ((b.x - o.x) / d) * (0.6 - d) * 0.3, ((b.y - o.y) / d) * (0.6 - d) * 0.3, open); } // don't stand inside each other
+  const want = threat ? Math.atan2(m.y - b.y, m.x - b.x) : b.h ?? b.a; // shine at it, or look where you're going
+  b.a += angDiff(want, b.a) * Math.min(1, dt * 8);
+}
+function botThink(b, G, all, M, threat) {
+  const m = host.mon, open = isOpen(G), near = (list) => list.sort((p, q) => dist(p, b) - dist(q, b))[0];
+  let mode = "search", goal = null;
+  if (threat) { // flee: somewhere close to me and far from it
+    const dm = bfs(M, Math.floor(m.x), Math.floor(m.y), open), db = bfs(M, Math.floor(b.x), Math.floor(b.y), open); let best = -1e9;
+    for (let i = 0; i < dm.length; i++) if (db[i] > 0 && db[i] < 10 && dm[i] >= 0) { const s = dm[i] - db[i] * 0.6; if (s > best) { best = s; goal = { x: (i % M.W) + 0.5, y: Math.floor(i / M.W) + 0.5 }; } }
+    mode = "flee";
+  } else {
+    const caught = near(all.filter((c) => G.down[c.id] && c.id !== b.id && dist(c, m) > 3.5));
+    const taken = new Set([...host.bots.values()].filter((o) => o !== b && o.mode === "fetch").map((o) => o.ki));
+    const key = near([...host.known].filter((i) => !G.keys[i].by && !taken.has(i)).map((i) => ({ i, ...G.keys[i] })));
+    if (caught) { mode = "free"; goal = { x: caught.x, y: caught.y }; }
+    else if (open) { mode = "exit"; goal = { x: M.exit.x - 0.6, y: M.exit.y }; }
+    else if (key) { mode = "fetch"; goal = key; b.ki = key.i; }
+    else if (b.mode === "search" && b.goal && dist(b, b.goal) > 1.2 && b.path.length) goal = b.goal;
+    else { const others = [...host.bots.values()].filter((o) => o !== b && o.goal).map((o) => o.goal), left = M.ends.filter((e) => !host.visited.has(e) && !others.some((o) => dist(o, e) < 3)); goal = near(left.length ? left : [...M.ends]) || M.start; if (!left.length) goal = M.ends[Math.floor(Math.random() * M.ends.length)]; }
+  }
+  if (!goal) return;
+  const same = b.goal && b.mode === mode && Math.floor(goal.x) === Math.floor(b.goal.x) && Math.floor(goal.y) === Math.floor(b.goal.y) && b.path.length;
+  b.mode = mode; b.goal = goal;
+  if (!same) b.path = route(M, b, goal, open);
+}
+
+// ── ME ──────────────────────────────────────────────────────────────────────────────
+const myName = (() => { try { return localStorage.getItem("mpa-name") || ""; } catch { return ""; } })() ||
+  ["Brave", "Quiet", "Jumpy", "Lucky", "Calm", "Sly"][Math.floor(Math.random() * 6)] + " " + ["Moth", "Owl", "Fox", "Hare", "Badger", "Bat"][Math.floor(Math.random() * 6)];
+let myColor = COLORS[0]; // picked on join: the first color nobody in the room has
+const me = { x: 1.5, y: 1.5, a: 0, l: true, m: false, runId: -1, lastSend: 0, played: -1, submitted: -1 };
+const input = { up: false, down: false, left: false, right: false }, stick = { id: -1, ox: 0, oy: 0, x: 0, y: 0 }, mouse = { x: 0, y: 0, at: -1e9 };
+function myTick(dt, g, M) {
+  if (me.runId !== g.id) { me.runId = g.id; Object.assign(me, spawnSpot(M, Math.max(0, livePlayers().indexOf(net.sessionId)))); me.a = 0; $("over").hidden = true; }
+  const caught = !!g.down[net.sessionId], canMove = g.phase === "hunt" && !caught && !ATTRACT;
+  let mx = (input.right ? 1 : 0) - (input.left ? 1 : 0) + stick.x, my = (input.down ? 1 : 0) - (input.up ? 1 : 0) + stick.y;
+  const len = Math.hypot(mx, my); if (len > 1) { mx /= len; my /= len; }
+  me.m = canMove && len > 0.15;
+  if (me.m) moveBody(M, me, mx * CONFIG.speed * dt, my * CONFIG.speed * dt, isOpen(g));
+  // aim: at the mouse (through the camera that drew the last frame); on touch, where you walk, or at the stalker when it's close
+  if (performance.now() - mouse.at < 4000 && !touchUI) { const [wx, wy] = toWorld(mouse.x, mouse.y); me.a = Math.atan2(wy - me.y, wx - me.x); }
+  else {
+    const mon = monNow(), threat = mon && mon.s !== "sleep" && dist(mon, me) < 6 && canSee(M, me, mon, isOpen(g));
+    if (threat) me.a += angDiff(Math.atan2(mon.y - me.y, mon.x - me.x), me.a) * Math.min(1, dt * 10);
+    else if (me.m) me.a += angDiff(Math.atan2(my, mx), me.a) * Math.min(1, dt * 10);
+  }
+  const now = performance.now();
+  if (now - me.lastSend > 80) { me.lastSend = now; net.me.set("p", JSON.stringify({ x: +me.x.toFixed(2), y: +me.y.toFixed(2), a: +me.a.toFixed(2), l: me.l ? 1 : 0, m: me.m ? 1 : 0 })); }
+}
+function monNow() { return isHost() && host.mon ? host.mon : shared("mon", null); }
+function toggleLight() { if (ATTRACT) return; me.l = !me.l; $("lamp").classList.toggle("off", !me.l); sfx("click"); }
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const cv = document.getElementById("game"), ctx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1, TS = 40;
+const darkCv = document.createElement("canvas"), dctx = darkCv.getContext("2d");
+function fit() { DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR; TS = ATTRACT ? H / 7 : Math.max(32, Math.min(64, Math.min(W, H) / 10)); darkCv.width = Math.ceil(W / 2); darkCv.height = Math.ceil(H / 2); }
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+const cam = { x: 0, y: 0 };
+const sx = (x) => (x - cam.x) * TS + W / 2, sy = (y) => (y - cam.y) * TS + H / 2;
+/** Screen point → maze point, through the camera that drew the frame. */
+const toWorld = (px, py) => [cam.x + (px - W / 2) / TS, cam.y + (py - H / 2) / TS];
+let mazeImg = null, mazeKey = "";
+/** The maze drawn once per run (stone floor, brick walls), then copied each frame. */
+function mazeImage(M) {
+  const key = M.seed + ":" + TS; if (mazeKey === key) return mazeImg;
+  const R = mulberry32(M.seed ^ 77), c = document.createElement("canvas"); c.width = Math.ceil(M.W * TS); c.height = Math.ceil(M.H * TS); const g = c.getContext("2d");
+  for (let y = 0; y < M.H; y++) for (let x = 0; x < M.W; x++) {
+    const w = M.wall[y * M.W + x], X = x * TS, Y = y * TS;
+    if (w === 1) {
+      g.fillStyle = "#5a4f7c"; g.fillRect(X, Y, TS + 1, TS + 1);
+      if (y === 0 || M.wall[(y - 1) * M.W + x] !== 1) { g.fillStyle = "#7a6ca6"; g.fillRect(X, Y, TS + 1, TS * 0.1); }
+      g.strokeStyle = "#3d3458"; g.lineWidth = 2; g.beginPath(); g.moveTo(X, Y + TS / 2); g.lineTo(X + TS, Y + TS / 2); g.moveTo(X + TS * (y % 2 ? 0.3 : 0.7), Y); g.lineTo(X + TS * (y % 2 ? 0.3 : 0.7), Y + TS / 2); g.moveTo(X + TS * (y % 2 ? 0.8 : 0.2), Y + TS / 2); g.lineTo(X + TS * (y % 2 ? 0.8 : 0.2), Y + TS); g.stroke();
+      if (y + 1 < M.H && M.wall[(y + 1) * M.W + x] !== 1) { g.fillStyle = "#342c4a"; g.fillRect(X, Y + TS * 0.74, TS + 1, TS * 0.26); }
+    } else {
+      const v = 26 + Math.floor(R() * 7); g.fillStyle = `rgb(${v},${v - 3},${v + 6})`; g.fillRect(X, Y, TS + 1, TS + 1);
+      g.fillStyle = "#00000022"; g.fillRect(X, Y, TS, 1); g.fillRect(X, Y, 1, TS);
+      if (R() < 0.12) { g.strokeStyle = "#ffffff10"; g.lineWidth = 1.5; g.beginPath(); g.moveTo(X + R() * TS, Y + R() * TS); g.lineTo(X + R() * TS, Y + R() * TS); g.stroke(); } // a crack
+      if (R() < 0.05) { g.fillStyle = "#e8e0d066"; g.beginPath(); g.arc(X + TS * 0.5, Y + TS * 0.6, TS * 0.08, 0, 7); g.fill(); g.fillRect(X + TS * 0.44, Y + TS * 0.62, TS * 0.12, TS * 0.12); } // a little skull
+      if (y > 0 && M.wall[(y - 1) * M.W + x] === 1) { const gr = g.createLinearGradient(0, Y, 0, Y + TS * 0.4); gr.addColorStop(0, "#00000066"); gr.addColorStop(1, "#00000000"); g.fillStyle = gr; g.fillRect(X, Y, TS + 1, TS * 0.4); }
+    }
+  }
+  mazeImg = c; mazeKey = key; return c;
+}
+/** The lit area of a flashlight: a fan of rays stopped by walls. */
+function cone(M, p, open) {
+  const pts = [[p.x, p.y]], n = 36, A = CONFIG.light.angle, R = CONFIG.light.range;
+  for (let k = 0; k <= n; k++) { const a = p.a - A + (2 * A * k) / n, d = castRay(M, p.x, p.y, a, R, open), e = d < R ? Math.min(R, d + 0.45) : d; pts.push([p.x + Math.cos(a) * e, p.y + Math.sin(a) * e]); } // a little past the hit, so the wall face lights up
+  return pts;
+}
+const views = new Map(); // id -> eased { x, y, a } for other players and (on non-hosts) bots
+const sparks = [];
+function body(p, t, caught, freeing) {
+  const X = sx(p.x), Y = sy(p.y), r = TS * CONFIG.radius * 1.15, bob = p.m ? Math.sin(t * 14 + p.x) * TS * 0.03 : 0;
+  ctx.fillStyle = "#0007"; ctx.beginPath(); ctx.ellipse(X, Y + r * 0.8, r, r * 0.35, 0, 0, 7); ctx.fill();
+  ctx.globalAlpha = caught ? 0.55 : 1;
+  ctx.fillStyle = caught ? "#8a8494" : p.color; ctx.beginPath(); ctx.arc(X, Y - bob, r, 0, 7); ctx.fill();
+  ctx.fillStyle = "#ffffff33"; ctx.beginPath(); ctx.arc(X - r * 0.3, Y - bob - r * 0.3, r * 0.35, 0, 7); ctx.fill();
+  const fx = Math.cos(p.a), fy = Math.sin(p.a);
+  for (const s of [-1, 1]) { const ex = X + fx * r * 0.45 - fy * s * r * 0.35, ey = Y - bob + fy * r * 0.45 + fx * s * r * 0.35; ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(ex, ey, r * 0.24, 0, 7); ctx.fill(); ctx.fillStyle = "#111"; ctx.beginPath(); ctx.arc(ex + fx * r * 0.1, ey + fy * r * 0.1, r * 0.12, 0, 7); ctx.fill(); }
+  ctx.strokeStyle = "#222"; ctx.lineWidth = r * 0.35; ctx.lineCap = "round"; ctx.beginPath(); ctx.moveTo(X + fx * r * 0.7, Y - bob + fy * r * 0.7); ctx.lineTo(X + fx * r * 1.35, Y - bob + fy * r * 1.35); ctx.stroke(); // the flashlight
+  if (p.l && !caught) { ctx.fillStyle = "#fff6c8"; ctx.beginPath(); ctx.arc(X + fx * r * 1.4, Y - bob + fy * r * 1.4, r * 0.18, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  if (freeing) { ctx.strokeStyle = "#7dffb0"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(X, Y, r * 1.6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * freeing); ctx.stroke(); }
+  if (!ATTRACT) { ctx.font = `700 ${Math.max(11, Math.round(TS * 0.28))}px system-ui`; ctx.textAlign = "center"; ctx.fillStyle = p.mine ? "#ffd27a" : "#ffffffcc"; ctx.fillText(p.mine ? "You" : p.name, X, Y - r - TS * 0.15); }
+}
+/** The stalker: a shifting knot of shadow with long fingers; it flinches in the light. */
+function stalker(m, t) {
+  const X = sx(m.x), Y = sy(m.y), r = TS * 0.42, jit = m.lit ? 3 : 1;
+  ctx.save(); ctx.translate(X + (m.lit ? Math.sin(t * 60) * 2 : 0), Y);
+  const haze = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 2.4); haze.addColorStop(0, "#5a0018aa"); haze.addColorStop(1, "#5a001800"); ctx.fillStyle = haze; ctx.beginPath(); ctx.arc(0, 0, r * 2.4, 0, 7); ctx.fill();
+  ctx.strokeStyle = "#0b0610"; ctx.lineWidth = r * 0.16; ctx.lineCap = "round";
+  for (let k = 0; k < 7; k++) { const a = (k / 7) * Math.PI * 2 + Math.sin(t * 2 + k) * 0.3, l = r * (1.3 + 0.4 * Math.sin(t * 5 * jit + k * 2)); ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(Math.cos(a + 0.4) * l * 0.6, Math.sin(a + 0.4) * l * 0.6, Math.cos(a) * l, Math.sin(a) * l); ctx.stroke(); }
+  for (let k = 0; k < 5; k++) { ctx.fillStyle = k % 2 ? "#14091c" : "#0b0610"; ctx.beginPath(); ctx.arc(Math.sin(t * 3 * jit + k) * r * 0.18, Math.cos(t * 2.5 * jit + k * 2) * r * 0.18, r * (0.85 - k * 0.08), 0, 7); ctx.fill(); }
+  if (m.lit) { ctx.fillStyle = "#d8d0e8"; ctx.beginPath(); ctx.ellipse(Math.cos(m.h) * r * 0.25, Math.sin(m.h) * r * 0.25, r * 0.38, r * 0.48, m.h, 0, 7); ctx.fill(); }
+  ctx.restore();
+}
+function eyes(m, t, alpha) { // drawn above the dark: two red eyes, always (it is fair to see them coming)
+  const X = sx(m.x), Y = sy(m.y), fx = Math.cos(m.h), fy = Math.sin(m.h), r = TS * 0.42, blink = Math.sin(t * 0.9) > 0.97 ? 0.2 : 1;
+  for (const s of [-1, 1]) {
+    const ex = X + fx * r * 0.5 - fy * s * r * 0.28, ey = Y + fy * r * 0.5 + fx * s * r * 0.28;
+    const g = ctx.createRadialGradient(ex, ey, 0, ex, ey, r * 0.6); g.addColorStop(0, `rgba(255,40,40,${0.6 * alpha})`); g.addColorStop(1, "rgba(255,40,40,0)"); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(ex, ey, r * 0.6, 0, 7); ctx.fill();
+    ctx.fillStyle = `rgba(255,${m.s === "chase" ? 60 : 120},${m.s === "chase" ? 60 : 100},${alpha})`; ctx.beginPath(); ctx.ellipse(ex, ey, r * 0.13, r * 0.13 * blink, 0, 0, 7); ctx.fill();
+  }
+}
+function keyIcon(X, Y, s, alpha) {
+  ctx.globalAlpha = alpha; ctx.strokeStyle = "#ffd23f"; ctx.fillStyle = "#ffd23f"; ctx.lineWidth = s * 0.18;
+  ctx.beginPath(); ctx.arc(X - s * 0.35, Y, s * 0.28, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(X - s * 0.07, Y); ctx.lineTo(X + s * 0.55, Y); ctx.lineTo(X + s * 0.55, Y + s * 0.25); ctx.moveTo(X + s * 0.32, Y); ctx.lineTo(X + s * 0.32, Y + s * 0.2); ctx.stroke(); ctx.globalAlpha = 1;
+}
+function draw(g, M, all, dt, now) {
+  const t = now / 1000, open = isOpen(g), mon = monNow();
+  let focus = me;
+  if (ATTRACT) { const bots = all.filter((p) => p.bot && !g.down[p.id]).sort((a, b) => (mon ? dist(a, mon) - dist(b, mon) : 0)); focus = bots[0] || all[0] || M.start; } // the preview follows the bot nearest the stalker
+  const k = 1 - Math.pow(ATTRACT ? 0.2 : 0.002, dt);
+  cam.x += (focus.x - cam.x) * k; cam.y += (focus.y - cam.y) * k;
+  if (Math.hypot(focus.x - cam.x, focus.y - cam.y) > 8) { cam.x = focus.x; cam.y = focus.y; }
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#050409"; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(mazeImage(M), sx(0), sy(0));
+  const ex = M.exit; // the exit door: chained shut, or open and glowing green
+  ctx.fillStyle = open ? "#2bd67b" : "#6b4a2a"; ctx.fillRect(sx(ex.tx), sy(ex.ty), TS, TS);
+  if (!open) { ctx.strokeStyle = "#c9c2d6"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(sx(ex.tx), sy(ex.ty)); ctx.lineTo(sx(ex.tx + 1), sy(ex.ty + 1)); ctx.moveTo(sx(ex.tx + 1), sy(ex.ty)); ctx.lineTo(sx(ex.tx), sy(ex.ty + 1)); ctx.stroke(); }
+  for (const key of g.keys) if (!key.by) keyIcon(sx(key.x), sy(key.y) + Math.sin(t * 3 + key.x) * 3, TS * 0.55, 1);
+  const list = all.map((p) => ({ ...p }));
+  for (const p of list) body(p, t, !!g.down[p.id], g.free[p.id] ? Math.min(1, (Date.now() - g.free[p.id]) / CONFIG.freeMs) : 0);
+  if (mon && mon.s !== "sleep") stalker(mon, t);
+  // darkness: one dark layer with the light cut out of it, drawn at half size
+  const s = 0.5, dark = ATTRACT ? 0.8 : CONFIG.light.dark;
+  dctx.setTransform(1, 0, 0, 1, 0, 0); dctx.globalCompositeOperation = "source-over"; dctx.fillStyle = `rgba(4,3,10,${dark})`; dctx.fillRect(0, 0, darkCv.width, darkCv.height);
+  dctx.globalCompositeOperation = "destination-out"; dctx.setTransform(s, 0, 0, s, 0, 0);
+  const cones = [];
+  for (const p of list) {
+    const caught = !!g.down[p.id], amb = CONFIG.light.ambient * (caught ? 0.6 : 1), X = sx(p.x), Y = sy(p.y);
+    let gr = dctx.createRadialGradient(X, Y, 0, X, Y, amb * TS); gr.addColorStop(0, "rgba(0,0,0,0.95)"); gr.addColorStop(1, "rgba(0,0,0,0)"); dctx.fillStyle = gr; dctx.beginPath(); dctx.arc(X, Y, amb * TS, 0, 7); dctx.fill();
+    if (!p.l || caught) continue;
+    const pts = cone(M, p, open); cones.push({ p, pts });
+    gr = dctx.createRadialGradient(X, Y, 0, X, Y, CONFIG.light.range * TS); gr.addColorStop(0, "rgba(0,0,0,1)"); gr.addColorStop(0.55, "rgba(0,0,0,0.9)"); gr.addColorStop(1, "rgba(0,0,0,0)");
+    dctx.fillStyle = gr; dctx.beginPath(); pts.forEach(([x, y], i) => (i ? dctx.lineTo(sx(x), sy(y)) : dctx.moveTo(sx(x), sy(y)))); dctx.closePath(); dctx.fill();
+  }
+  if (open) { const X = sx(ex.x), Y = sy(ex.y), gr = dctx.createRadialGradient(X, Y, 0, X, Y, TS * 2.2); gr.addColorStop(0, "rgba(0,0,0,0.9)"); gr.addColorStop(1, "rgba(0,0,0,0)"); dctx.fillStyle = gr; dctx.beginPath(); dctx.arc(X, Y, TS * 2.2, 0, 7); dctx.fill(); }
+  ctx.drawImage(darkCv, 0, 0, W, H);
+  ctx.globalCompositeOperation = "lighter"; // a warm tint inside each beam
+  for (const { p, pts } of cones) { const X = sx(p.x), Y = sy(p.y), gr = ctx.createRadialGradient(X, Y, 0, X, Y, CONFIG.light.range * TS); gr.addColorStop(0, "rgba(255,214,140,0.16)"); gr.addColorStop(1, "rgba(255,214,140,0)"); ctx.fillStyle = gr; ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y)))); ctx.closePath(); ctx.fill(); }
+  ctx.globalCompositeOperation = "source-over";
+  for (const key of g.keys) if (!key.by && dist(key, focus) < 6 && canSee(M, focus, key, open)) { // keys glint in the dark when you're near
+    const X = sx(key.x), Y = sy(key.y), gr = ctx.createRadialGradient(X, Y, 0, X, Y, TS * 0.7); gr.addColorStop(0, `rgba(255,210,63,${0.35 + 0.2 * Math.sin(t * 4)})`); gr.addColorStop(1, "rgba(255,210,63,0)"); ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(X, Y, TS * 0.7, 0, 7); ctx.fill();
+  }
+  if (mon && mon.s !== "sleep") eyes(mon, t, Math.max(0.25, 1 - dist(mon, focus) / 12));
+  if (open && !ATTRACT && dist(ex, me) > 4) { // an arrow to the open exit
+    const a = Math.atan2(ex.y - me.y, ex.x - me.x), R = Math.min(W, H) * 0.42; ctx.save(); ctx.translate(W / 2 + Math.cos(a) * R, H / 2 + Math.sin(a) * R); ctx.rotate(a);
+    ctx.fillStyle = "#2bd67bcc"; ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -10); ctx.lineTo(-8, 10); ctx.fill(); ctx.restore();
+  }
+  for (let i = sparks.length - 1; i >= 0; i--) { const p = sparks[i]; p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; if (p.life <= 0) { sparks.splice(i, 1); continue; } ctx.globalAlpha = Math.min(1, p.life * 2); ctx.fillStyle = p.color; ctx.fillRect(sx(p.x) - 2, sy(p.y) - 2, 4, 4); ctx.globalAlpha = 1; }
+  if (mon && mon.s === "chase" && !ATTRACT && dist(mon, me) < 7) { const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7); v.addColorStop(0, "rgba(120,0,20,0)"); v.addColorStop(1, `rgba(120,0,20,${0.35 + 0.15 * Math.sin(t * 8)})`); ctx.fillStyle = v; ctx.fillRect(0, 0, W, H); }
+  if (stick.id >= 0) { ctx.strokeStyle = "#ffffff55"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(stick.ox, stick.oy, 44, 0, 7); ctx.stroke(); ctx.fillStyle = "#ffffff44"; ctx.beginPath(); ctx.arc(stick.ox + stick.x * 44, stick.oy + stick.y * 44, 20, 0, 7); ctx.fill(); }
+}
+/** Everyone to draw: me from my own state, others eased toward their reports, bots from the host (or its snapshot). */
+function gather(g, dt) {
+  const out = [], seen = new Set(), k = 1 - Math.pow(0.0005, dt);
+  for (const p of people()) {
+    if (p.mine || (p.bot && isHost())) { out.push(p); continue; }
+    let v = views.get(p.id); if (!v || dist(v, p) > 3) { v = { x: p.x, y: p.y, a: p.a }; views.set(p.id, v); }
+    v.x += (p.x - v.x) * k; v.y += (p.y - v.y) * k; v.a += angDiff(p.a, v.a) * k; seen.add(p.id);
+    out.push({ ...p, x: v.x, y: v.y, a: v.a });
+  }
+  for (const id of views.keys()) if (!seen.has(id)) views.delete(id);
+  return out;
+}
+
+// ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const fmt = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}`;
+let board = null, msgTimer = 0, seen = { run: -1, keys: "", down: "", phase: "" };
+function say(text, ms = 2200) { const m = $("msg"); m.textContent = text; m.classList.add("on"); clearTimeout(msgTimer); msgTimer = setTimeout(() => m.classList.remove("on"), ms); }
+/** React to changes in the run (keys found, someone caught or freed, the exit, the end), on every screen alike. */
+function onChanges(g, all) {
+  if (seen.run !== g.id) { seen = { run: g.id, keys: JSON.stringify(g.keys), down: JSON.stringify(g.down), phase: g.phase }; if (g.phase === "brief") me.played = g.id; return; }
+  const keys = JSON.stringify(g.keys), down = JSON.stringify(g.down);
+  if (keys !== seen.keys) {
+    const before = parse(seen.keys, []); g.keys.forEach((k, i) => { if (k.by && before[i] && !before[i].by) { if (!ATTRACT) say(isOpen(g) ? "The exit is open! Get out!" : `${k.by} found a key`); sfx(isOpen(g) ? "open" : "key"); for (let j = 0; j < 20; j++) sparks.push({ x: k.x, y: k.y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4, life: 0.8, color: "#ffd23f" }); } });
+    seen.keys = keys;
+  }
+  if (down !== seen.down) {
+    const before = parse(seen.down, {});
+    for (const id of Object.keys(g.down)) if (!before[id]) { const p = all.find((c) => c.id === id); if (!ATTRACT) say(id === net.sessionId ? "It got you!" : `It got ${p ? p.name : "someone"}! Stand next to them to set them free`); sfx("caught"); }
+    for (const id of Object.keys(before)) if (!g.down[id] && g.phase === "hunt") { const p = all.find((c) => c.id === id); if (!ATTRACT && p) say(`${p.mine ? "You are" : p.name + " is"} free`, 1500); }
+    seen.down = down;
+  }
+  if (g.phase !== seen.phase) {
+    seen.phase = g.phase;
+    if (g.phase === "hunt") { me.played = g.id; if (!ATTRACT) say("Find the keys", 1600); }
+    if (g.phase === "won" || g.phase === "lost") showResults(g);
+  }
+}
+function hud(g, all) {
+  $("caught").hidden = !g.down[net.sessionId] || g.phase !== "hunt" || ATTRACT;
+  if (ATTRACT) return;
+  const found = g.keys.filter((k) => k.by).length, t = g.phase === "won" ? g.ms : g.phase === "hunt" ? Date.now() - g.startAt : 0;
+  $("keys").innerHTML = `🔑 ${found}/${g.keys.length}${isOpen(g) ? " · exit open!" : ""} <small>${fmt(Math.max(0, t))}</small>`;
+  $("team").innerHTML = all.map((p) => `<div class="${g.down[p.id] ? "down" : ""}"><i style="background:${esc(p.color)}"></i>${esc(p.mine ? "You" : p.name)}${p.bot ? " 🤖" : ""}</div>`).join("");
+  const n = livePlayers().length;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the stalker" : ""}`;
+  $("hint").style.opacity = g.phase === "brief" || (g.phase === "hunt" && Date.now() - g.startAt < 7000) ? 1 : 0;
+  $("hint").innerHTML = g.phase === "brief" ? `It wakes in ${Math.ceil((g.startAt - Date.now()) / 1000)}…<br>Find ${g.keys.length} keys, then the exit.` : touchUI ? "Drag to walk. Your light finds the way, but it sees the light too. Shine it in its face to slow it." : "WASD to walk, mouse to aim, F to switch the light. It sees your light: shine it in its face to slow it.";
+}
+function showResults(g) {
+  if (ATTRACT) return;
+  const won = g.phase === "won";
+  $("overTitle").textContent = won ? "You escaped!" : "It got everyone";
+  $("overText").textContent = won ? `${g.by} reached the exit. Time: ${fmt(g.ms)}` : `${g.keys.filter((k) => k.by).length} of ${g.keys.length} keys found. A new maze is coming.`;
+  setTimeout(() => { if (game()?.phase === g.phase && game()?.id === g.id) $("over").hidden = false; }, 1200);
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  const submit = won && me.played === g.id && me.submitted !== g.id ? board.submit(Math.max(0, 3600000 - g.ms)).catch(() => null) : Promise.resolve();
+  me.submitted = g.id; list.innerHTML = "<li>Loading…</li>";
+  submit.then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(3600000 - e.score)}</span></li>`).join("") : "<li>No escapes yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").onclick = () => { const g = game(); if (!g || (g.phase !== "won" && g.phase !== "lost")) return; if (isHost()) startRun(g.id + 1); else net.send("again", {}); };
+let audio = null, nextBeat = 0;
+function sfx(kind) {
+  if (!audio) return;
+  try {
+    const t = audio.currentTime, tone = (f, d, type, v, f2, at = 0) => { const o = audio.createOscillator(), gn = audio.createGain(); o.type = type; o.frequency.setValueAtTime(f, t + at); o.frequency.exponentialRampToValueAtTime(f2, t + at + d); gn.gain.setValueAtTime(v, t + at); gn.gain.exponentialRampToValueAtTime(0.0001, t + at + d); o.connect(gn).connect(audio.destination); o.start(t + at); o.stop(t + at + d + 0.02); };
+    if (kind === "beat") { tone(60, 0.12, "sine", 0.35, 40); tone(55, 0.12, "sine", 0.25, 38, 0.16); }
+    if (kind === "key") [880, 1175, 1568].forEach((f, k) => tone(f, 0.15, "triangle", 0.06, f, k * 0.07));
+    if (kind === "open") [523, 659, 784, 1046].forEach((f, k) => tone(f, 0.25, "triangle", 0.07, f, k * 0.1));
+    if (kind === "caught") { tone(220, 0.6, "sawtooth", 0.08, 55); tone(233, 0.6, "sawtooth", 0.06, 50); }
+    if (kind === "click") tone(1400, 0.03, "square", 0.03, 900);
+  } catch {}
+}
+/** A heartbeat that speeds up as the stalker gets closer to you. */
+function heartbeat(g, now) {
+  const mon = monNow(); if (!mon || mon.s === "sleep" || g.phase !== "hunt" || ATTRACT) return;
+  const d = dist(mon, me); if (d > 9 || now < nextBeat) return;
+  sfx("beat"); nextBeat = now + 350 + d * 110;
+}
+const takenColors = () => new Set([...livePlayers().filter((id) => id !== net.sessionId).map((id) => S.entities.players[id]?.c), ...shared("bots", []).map((b) => b.c)]);
+/** Two players picked the same color at once (the joiner's first state can be empty): the later sessionId picks again. Bots' colors count too. */
+function fixColor() {
+  const others = livePlayers().filter((id) => id !== net.sessionId), botColors = isHost() ? [...host.bots.values()].map((b) => b.color) : shared("bots", []).map((b) => b.c);
+  if (!others.some((id) => S.entities.players[id]?.c === myColor && id < net.sessionId) && !botColors.includes(myColor)) return;
+  const taken = new Set([...others.map((id) => S.entities.players[id]?.c), ...botColors]), free = COLORS.find((c) => !taken.has(c));
+  if (free) { myColor = free; net.me.set("c", free); }
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches && !ATTRACT;
+$("lamp").hidden = !touchUI;
+const wake = () => { if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch {} } };
+const KEYS = { ArrowUp: "up", w: "up", W: "up", ArrowDown: "down", s: "down", S: "down", ArrowLeft: "left", a: "left", A: "left", ArrowRight: "right", d: "right", D: "right" };
+addEventListener("keydown", (e) => { wake(); const k = KEYS[e.key]; if (k) { e.preventDefault(); input[k] = true; } if ((e.key === "f" || e.key === "F" || e.key === " ") && !e.repeat) { e.preventDefault(); toggleLight(); } });
+addEventListener("keyup", (e) => { const k = KEYS[e.key]; if (k) input[k] = false; });
+addEventListener("blur", () => { for (const k in input) input[k] = false; });
+cv.addEventListener("pointermove", (e) => {
+  if (e.pointerType === "mouse") { mouse.x = e.clientX; mouse.y = e.clientY; mouse.at = performance.now(); }
+  if (e.pointerId === stick.id) { const dx = e.clientX - stick.ox, dy = e.clientY - stick.oy, d = Math.hypot(dx, dy); stick.x = d > 8 ? dx / Math.max(d, 44) : 0; stick.y = d > 8 ? dy / Math.max(d, 44) : 0; }
+});
+cv.addEventListener("pointerdown", (e) => {
+  e.preventDefault(); wake();
+  if (e.pointerType === "mouse") { if (e.button === 2) toggleLight(); return; }
+  if (stick.id < 0) { stick.id = e.pointerId; stick.ox = e.clientX; stick.oy = e.clientY; stick.x = stick.y = 0; try { cv.setPointerCapture(e.pointerId); } catch {} }
+});
+for (const ev of ["pointerup", "pointercancel"]) cv.addEventListener(ev, (e) => { if (e.pointerId === stick.id) { stick.id = -1; stick.x = stick.y = 0; } });
+cv.addEventListener("contextmenu", (e) => e.preventDefault());
+$("lamp").addEventListener("pointerdown", (e) => { e.preventDefault(); wake(); toggleLight(); });
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0;
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be timed before load: never negative
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  if (isHost()) hostTick(dt, now); else host.was = false;
+  const g = game();
+  if (g) {
+    const M = maze(g.seed);
+    myTick(dt, g, M);
+    const all = gather(g, dt);
+    onChanges(g, all);
+    draw(g, M, all, dt, now);
+    heartbeat(g, now);
+    if (now - lastHud > 150) { lastHud = now; hud(g, all); }
+  }
+  requestAnimationFrame(frame);
+}
+
+(async function start() {
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.on("again", () => { const g = game(); if (isHost() && g && (g.phase === "won" || g.phase === "lost")) startRun(g.id + 1); });
+  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = takenColors();
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  if (ATTRACT) { for (const id of ["top", "net", "hint"]) $(id).style.display = "none"; Object.assign(CONFIG, { seats: 4, briefMs: 200, resultsMs: 2500 }); Object.assign(CONFIG.stalker, { sleepMs: 0, hear: 9, sight: 10 }); }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
