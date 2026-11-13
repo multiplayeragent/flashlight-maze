@@ -24,6 +24,7 @@
   .card h2 { margin: 0 0 4px; font-size: 26px; } .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffd27a; text-align: left; }
   .card ol { text-align: left; margin: 0; padding-left: 24px; font-size: 14px; } .card li span { float: right; font-variant-numeric: tabular-nums; }
   .card p { margin: 6px 0; opacity: .85; }
+  .card li.note { list-style: none; margin-left: -24px; opacity: .8; } /* a status line, not a numbered entry */
   button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: #ffd27a; color: #2a1a00; font: 800 17px system-ui, sans-serif; cursor: pointer; }
   #lamp { position: fixed; right: max(18px, env(safe-area-inset-right)); bottom: calc(max(18px, env(safe-area-inset-bottom)) + 20px); width: 84px; height: 84px; border-radius: 50%;
           border: 2px solid #ffd27a99; background: #ffd27a33; color: #fff; font: 800 14px system-ui, sans-serif; touch-action: none; }
@@ -41,7 +42,7 @@
 <button id="lamp" hidden>LIGHT</button>
 <div id="over" hidden><div class="card">
   <h2 id="overTitle"></h2><p id="overText"></p>
-  <h3>Fastest escapes</h3><ol id="board"><li>Loading…</li></ol>
+  <h3>Fastest escapes</h3><ol id="board"><li class="note">Loading…</li></ol>
   <button class="go" id="again">Play again</button>
 </div></div>
 <script>
@@ -370,7 +371,8 @@ function botTick(b, dt, G, all, t, M) {
   const threat = m.s !== "feed" && m.s !== "sleep" && ((m.s === "chase" && m.t === b.id) || (dist(m, b) < 6 && canSee(M, b, m, open)));
   if (t > b.think) { b.think = t + 400 + Math.random() * 300; botThink(b, G, all, M, threat); }
   if (follow(M, b, CONFIG.botSpeed, dt, open)) b.m = true;
-  for (const o of host.bots.values()) { const d = dist(o, b); if (o !== b && d < 0.6 && d > 0.001) moveBody(M, b, ((b.x - o.x) / d) * (0.6 - d) * 0.3, ((b.y - o.y) / d) * (0.6 - d) * 0.3, open); } // don't stand inside each other
+  if (!b.m) for (const o of host.bots.values()) { const d = dist(o, b); if (o !== b && d < 0.6 && d > 0.001) moveBody(M, b, ((b.x - o.x) / d) * (0.6 - d) * 0.3, ((b.y - o.y) / d) * (0.6 - d) * 0.3, open); } // standing still: don't stand inside each other (walking bots pass each other in narrow corridors, like players)
+  b.l = threat || m.s === "feed" || m.s === "sleep" || dist(m, b) > CONFIG.stalker.sight + 2; // light off to hide while it prowls nearby, on to shine in its face when it comes for you
   const want = threat ? Math.atan2(m.y - b.y, m.x - b.x) : b.h ?? b.a; // shine at it, or look where you're going
   b.a += angDiff(want, b.a) * Math.min(1, dt * 8);
 }
@@ -421,6 +423,14 @@ function myTick(dt, g, M) {
   if (now - me.lastSend > 80) { me.lastSend = now; net.me.set("p", JSON.stringify({ x: +me.x.toFixed(2), y: +me.y.toFixed(2), a: +me.a.toFixed(2), l: me.l ? 1 : 0, m: me.m ? 1 : 0 })); }
 }
 function monNow() { return isHost() && host.mon ? host.mon : shared("mon", null); }
+const monView = { x: 0, y: 0, h: 0, on: false };
+/** The stalker as drawn: on the host its live position, elsewhere eased toward the ~10/s snapshot (so it glides instead of stepping). */
+function monDrawn(dt) {
+  const m = monNow(); if (!m || (isHost() && host.mon)) return m;
+  if (!monView.on || dist(monView, m) > 3) Object.assign(monView, { x: m.x, y: m.y, h: m.h, on: true });
+  const k = 1 - Math.pow(0.0005, dt); monView.x += (m.x - monView.x) * k; monView.y += (m.y - monView.y) * k; monView.h += angDiff(m.h, monView.h) * k;
+  return { ...m, x: monView.x, y: monView.y, h: monView.h };
+}
 function toggleLight() { if (ATTRACT) return; me.l = !me.l; $("lamp").classList.toggle("off", !me.l); sfx("click"); }
 
 // ── DRAW ────────────────────────────────────────────────────────────────────────────
@@ -502,7 +512,7 @@ function keyIcon(X, Y, s, alpha) {
   ctx.beginPath(); ctx.moveTo(X - s * 0.07, Y); ctx.lineTo(X + s * 0.55, Y); ctx.lineTo(X + s * 0.55, Y + s * 0.25); ctx.moveTo(X + s * 0.32, Y); ctx.lineTo(X + s * 0.32, Y + s * 0.2); ctx.stroke(); ctx.globalAlpha = 1;
 }
 function draw(g, M, all, dt, now) {
-  const t = now / 1000, open = isOpen(g), mon = monNow();
+  const t = now / 1000, open = isOpen(g), mon = monDrawn(dt);
   let focus = me;
   if (ATTRACT) { const bots = all.filter((p) => p.bot && !g.down[p.id]).sort((a, b) => (mon ? dist(a, mon) - dist(b, mon) : 0)); focus = bots[0] || all[0] || M.start; } // the preview follows the bot nearest the stalker
   const k = 1 - Math.pow(ATTRACT ? 0.2 : 0.002, dt);
@@ -605,12 +615,12 @@ function showResults(g) {
   $("overText").textContent = won ? `${g.by} reached the exit. Time: ${fmt(g.ms)}` : `${g.keys.filter((k) => k.by).length} of ${g.keys.length} keys found. A new maze is coming.`;
   setTimeout(() => { if (game()?.phase === g.phase && game()?.id === g.id) $("over").hidden = false; }, 1200);
   const list = $("board");
-  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  if (!board) { list.innerHTML = "<li class=\"note\">Leaderboards need a connection.</li>"; return; }
   const submit = won && me.played === g.id && me.submitted !== g.id ? board.submit(Math.max(0, 3600000 - g.ms)).catch(() => null) : Promise.resolve();
-  me.submitted = g.id; list.innerHTML = "<li>Loading…</li>";
+  me.submitted = g.id; list.innerHTML = "<li class=\"note\">Loading…</li>";
   submit.then(() => board.top(10)).then(({ entries }) => {
-    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(3600000 - e.score)}</span></li>`).join("") : "<li>No escapes yet. Be the first.</li>";
-  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(3600000 - e.score)}</span></li>`).join("") : "<li class=\"note\">No escapes yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li class=\"note\">Couldn't load the leaderboard.</li>"; });
 }
 $("again").onclick = () => { const g = game(); if (!g || (g.phase !== "won" && g.phase !== "lost")) return; if (isHost()) startRun(g.id + 1); else net.send("again", {}); };
 let audio = null, nextBeat = 0;
