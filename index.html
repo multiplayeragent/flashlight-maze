@@ -69,7 +69,7 @@
  *     `v`, seed, phase, timers incl. when the stalker wakes, which keys are found and by whom, who is caught and who is
  *     being freed), `mon` (the stalker, ~10/s) and `bots`. A new host adopts all three.
  *   - Every client builds the same maze from game.seed (a seeded PRNG).
- *   - There are no intents to send but "again" {}: the host sees everyone's position, so it
+ *   - There are no intents to send but "again" { id }: the host sees everyone's position, so it
  *     picks up keys, frees caught players and opens the exit itself.
  *   - The stalker sees a flashlight from far away and hears footsteps; a light in its face
  *     slows it down. It downs who it catches.
@@ -606,7 +606,7 @@ function hud(g, all) {
   const n = livePlayers().length;
   $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the stalker" : ""}`;
   $("hint").style.opacity = g.phase === "brief" || (g.phase === "hunt" && Date.now() - g.startAt < 7000) ? 1 : 0;
-  $("hint").innerHTML = g.phase === "brief" ? `It wakes in ${Math.ceil((g.startAt - Date.now()) / 1000)}…<br>Find ${g.keys.length} keys, then the exit.` : touchUI ? "Drag to walk. Your light finds the way, but it sees the light too. Shine it in its face to slow it." : "WASD to walk, mouse to aim, F to switch the light. It sees your light: shine it in its face to slow it.";
+  $("hint").innerHTML = g.phase === "brief" ? `Starting in ${Math.max(1, Math.ceil((g.startAt - Date.now()) / 1000))}…<br>Find ${g.keys.length} keys, then the exit. It wakes up soon after.` : touchUI ? "Drag to walk. Your light finds the way, but it sees the light too. Shine it in its face to slow it." : "WASD to walk, mouse to aim, F to switch the light. It sees your light: shine it in its face to slow it.";
 }
 function showResults(g) {
   if (ATTRACT) return;
@@ -622,7 +622,7 @@ function showResults(g) {
     list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(3600000 - e.score)}</span></li>`).join("") : "<li class=\"note\">No escapes yet. Be the first.</li>";
   }).catch(() => { list.innerHTML = "<li class=\"note\">Couldn't load the leaderboard.</li>"; });
 }
-$("again").onclick = () => { const g = game(); if (!g || (g.phase !== "won" && g.phase !== "lost")) return; if (isHost()) startRun(g.id + 1); else net.send("again", {}); };
+$("again").onclick = () => { const g = game(); if (!g || (g.phase !== "won" && g.phase !== "lost")) return; if (isHost()) startRun(g.id + 1); else net.send("again", { id: g.id }); };
 let audio = null, nextBeat = 0;
 function sfx(kind) {
   if (!audio) return;
@@ -696,7 +696,7 @@ function frame(now) {
 (async function start() {
   net = await connect();
   net.onState((st) => { S = st; });
-  net.on("again", () => { const g = game(); if (isHost() && g && (g.phase === "won" || g.phase === "lost")) startRun(g.id + 1); });
+  net.on("again", (d) => { const g = game(); if (isHost() && g && d && d.id === g.id && (g.phase === "won" || g.phase === "lost")) startRun(g.id + 1); }); // only for the run that just ended, not a late click from an older one
   net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
   if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
   const taken = takenColors();
